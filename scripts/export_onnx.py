@@ -4,10 +4,12 @@ from torchvision import models
 import os
 import glob
 import numpy as np
+from pathlib import Path
 
 NUM_CLASSES = 7
-MODEL_DIR = '/root/graduation_project/my_project/model_save/20260125_1112'
-CPP_MODEL_DIR = '/root/graduation_project/cpp_infer/model/'
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODEL_DIR = str(PROJECT_ROOT / 'model_save' / '20260125_1112')
+CPP_MODEL_DIR = str(PROJECT_ROOT / 'outputs' / 'exports' / 'onnx')
 
 class ResNetWithFeatures(nn.Module):
     # 保持你之前的封装不变
@@ -56,4 +58,5 @@ def batch_export_ensemble():
             input_names=['input'], output_names=['output', 'feature_maps']
         )
         
-batch_export_ensemble()
+if __name__ == '__main__':
+    batch_export_ensemble()

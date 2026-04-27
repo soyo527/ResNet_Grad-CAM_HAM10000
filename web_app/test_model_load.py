@@ -4,8 +4,10 @@ import torch.nn as nn
 from torchvision import models
 import os
 import glob
+from pathlib import Path
 
-MODEL_DIR = r'D:\软件\工作文件夹\本科毕设\my_project\model_save\20260412_1215\resnet'
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODEL_DIR = str(PROJECT_ROOT / 'model_save' / '20260412_1215' / 'resnet')
 NUM_CLASSES = 7
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -1,10 +1,12 @@
 import os
 import shutil
 from tqdm import tqdm
+from pathlib import Path
 
 # ================= 配置区域 =================
-source_root = './data'          # 你现在的train/val所在的根目录
-target_dir = './data/all_data'  # 你想把数据合并到的新位置
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+source_root = str(PROJECT_ROOT / 'data')          # 你现在的train/val所在的根目录
+target_dir = str(PROJECT_ROOT / 'data' / 'all_data')  # 你想把数据合并到的新位置
 # ===========================================
 
 def merge_datasets():

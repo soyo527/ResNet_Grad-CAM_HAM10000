@@ -13,11 +13,14 @@ import warnings
 import matplotlib.pyplot as plt
 import seaborn as sns
 from itertools import cycle
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # ================= 配置区域 =================
 # 1. 路径配置
-TEST_DIR = '/root/graduation_project/my_project/data/test' 
-MODEL_DIR = '/root/graduation_project/my_project/model_save/20260125_1112'
+TEST_DIR = str(PROJECT_ROOT / 'data' / 'test')
+MODEL_DIR = str(PROJECT_ROOT / 'model_save' / '20260125_1112')
 
 # 2. 基础参数
 NUM_CLASSES = 7
@@ -34,7 +37,7 @@ PRIORITY_THRESHOLDS = [
 ]
 
 # 4. 绘图保存路径
-PLOT_SAVE_DIR = '/root/graduation_project/my_project/thesis_plots'
+PLOT_SAVE_DIR = str(PROJECT_ROOT / 'reports' / 'figures' / 'thesis_plots')
 # ===========================================
 
 # 屏蔽警告

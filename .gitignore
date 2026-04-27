@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+outputs/
+data/
+model_save/
+*.onnx
+*.bin
+*.pth

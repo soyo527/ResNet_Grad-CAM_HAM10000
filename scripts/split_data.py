@@ -6,7 +6,8 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 # ================= 配置区域 =================
-BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BASE_DIR = PROJECT_ROOT
 ORIGINAL_DATA_DIR = BASE_DIR / "odata"
 METADATA_PATH = ORIGINAL_DATA_DIR / "HAM10000_metadata.csv"
 SOURCE_DIRS = [

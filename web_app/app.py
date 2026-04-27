@@ -14,6 +14,7 @@ from flask_cors import CORS
 import base64
 import numpy as np
 import sys
+from pathlib import Path
 
 # Force UTF-8 output
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -23,8 +24,8 @@ app = Flask(__name__)
 CORS(app)
 
 # ================= Configuration =================
-# Use the latest model directory instead of the corrupted one
-MODEL_DIR = r'D:\软件\工作文件夹\本科毕设\my_project\model_save\20260412_1215\resnet'
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODEL_DIR = str(PROJECT_ROOT / 'model_save' / '20260412_1215' / 'resnet')
 NUM_CLASSES = 7
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

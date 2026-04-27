@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skin-lesion-classification"
+version = "0.1.0"
+description = "HAM10000 skin lesion classification experiments and web demo"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "torchvision",
+  "numpy",
+  "pandas",
+  "scikit-learn",
+  "matplotlib",
+  "seaborn",
+  "tqdm",
+  "pillow",
+  "flask",
+  "flask-cors",
+  "pyyaml",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -2,12 +2,15 @@
 """测试应用是否可以正常启动"""
 import sys
 import os
+from pathlib import Path
 
 # 设置环境变量
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-# 切换到web_app目录
-os.chdir('D:\\软件\\工作文件夹\\本科毕设\\my_project\\web_app')
+# 切换到 web_app 目录
+WEB_APP_DIR = Path(__file__).resolve().parent
+os.chdir(WEB_APP_DIR)
+sys.path.insert(0, str(WEB_APP_DIR))
 
 try:
     # 导入app模块
