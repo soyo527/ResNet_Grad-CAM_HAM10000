@@ -1,4 +1,4 @@
-# Skin Lesion Classification Project
+# 基于ResNet50与Grad-CAM的皮肤病辅助诊断系统设计与实现
 
 这是毕业设计项目的整理版结构。项目保留现有数据集、模型权重、Web 演示和论文图表，并把训练代码整理为可直接运行的 Python 脚本。
 
