@@ -90,7 +90,7 @@ def main():
 
     # --- 💡 恢复功能：详细的分病种统计表格 ---
     print("\n[最终数据分布报告]")
-    print(f"{'Class':<10} | {'Train':<8} | {'Val':<8} | {'Test':<8} | {'Total':<8}")
+    print(f"{'类别':<10} | {'训练集':<8} | {'验证集':<8} | {'测试集':<8} | {'总数':<8}")
     print("-" * 50)
     
     all_classes = sorted(df['dx'].unique())
@@ -109,7 +109,7 @@ def main():
         print(f"{cls:<10} | {n_train:<8} | {n_val:<8} | {n_test:<8} | {n_total:<8}")
         
     print("-" * 50)
-    print(f"{'ALL':<10} | {total_train:<8} | {total_val:<8} | {total_test:<8} | {total_train+total_val+total_test:<8}")
+    print(f"{'合计':<10} | {total_train:<8} | {total_val:<8} | {total_test:<8} | {total_train+total_val+total_test:<8}")
     print(f"\n数据集已生成至: {OUTPUT_DIR}")
 
 if __name__ == "__main__":

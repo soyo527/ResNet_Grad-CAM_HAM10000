@@ -22,5 +22,15 @@ dependencies = [
   "pyyaml",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+  "constants",
+  "data",
+  "engine",
+  "inference",
+  "models",
+  "paths",
+  "thresholds",
+  "utils",
+]

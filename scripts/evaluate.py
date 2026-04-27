@@ -1,348 +1,335 @@
-import torch
-import torch.nn as nn
-from torchvision import models, transforms, datasets
-from torch.utils.data import DataLoader
-import torch.nn.functional as F
-from tqdm import tqdm
-import numpy as np
-from sklearn.metrics import classification_report, accuracy_score, f1_score, roc_curve, auc, confusion_matrix
-from sklearn.preprocessing import label_binarize
-import glob
-import os
-import warnings
-import matplotlib.pyplot as plt
-import seaborn as sns
-from itertools import cycle
+import argparse
+import re
+import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import torch
+import torch.nn.functional as F
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
+from sklearn.preprocessing import label_binarize
+from torch.utils.data import DataLoader
+from torchvision import datasets
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
-# ================= 配置区域 =================
-# 1. 路径配置
-TEST_DIR = str(PROJECT_ROOT / 'data' / 'test')
-MODEL_DIR = str(PROJECT_ROOT / 'model_save' / '20260125_1112')
+from constants import CLASS_NAMES, DEFAULT_NV_SUPPRESSION_THRESHOLD, DEFAULT_PRIORITY_THRESHOLDS
+from data import build_eval_transform
+from models import load_resnet_checkpoint
+from utils import ensure_dir, set_seed
 
-# 2. 基础参数
-NUM_CLASSES = 7
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ARCHITECTURES = ("resnet18", "resnet50", "resnet101")
 
-# 3. 阈值策略配置
-# 这里的逻辑是：必须同时满足 (目标概率 > Threshold) AND (NV概率 < NV_LIMIT)
-NV_SUPPRESSION_THRESHOLD = 0.5  # 【新增】NV 抑制阈值 (用户指定为 0.8)
+CLASS_NAME_ZH = {
+    "akiec": "光化性角化病",
+    "bcc": "基底细胞癌",
+    "bkl": "良性角化病",
+    "df": "皮肤纤维瘤",
+    "mel": "黑色素瘤",
+    "nv": "黑色素细胞痣",
+    "vasc": "血管性病变",
+}
 
-PRIORITY_THRESHOLDS = [
-    ('mel', 0.25),   # 第一优先级：黑色素瘤 (高危)
-    ('bcc', 0.35),   # 第二优先级：基底细胞癌
-    ('akiec', 0.30)  # 第三优先级：癌前病变
-]
+COLUMN_NAME_ZH = {
+    "strategy": "评估策略",
+    "fold": "折次",
+    "checkpoint": "模型文件",
+    "checkpoint_val_f1": "训练验证F1",
+    "accuracy": "准确率",
+    "macro_precision": "宏平均精确率",
+    "macro_recall": "宏平均召回率",
+    "macro_f1": "宏平均F1",
+    "weighted_f1": "加权F1",
+    "macro_ovr_auc": "宏平均OvR AUC",
+    "weighted_ovr_auc": "加权OvR AUC",
+    "class": "类别",
+    "precision": "精确率",
+    "recall": "召回率",
+    "f1-score": "F1分数",
+    "support": "样本数",
+}
 
-# 4. 绘图保存路径
-PLOT_SAVE_DIR = str(PROJECT_ROOT / 'reports' / 'figures' / 'thesis_plots')
-# ===========================================
+ROW_NAME_ZH = {
+    "accuracy": "准确率",
+    "macro avg": "宏平均",
+    "weighted avg": "加权平均",
+}
 
-# 屏蔽警告
-warnings.filterwarnings("ignore")
 
-# ==========================================
-# 🛠️ 工具函数：毕设绘图套件 (新增)
-# ==========================================
-def plot_thesis_figures(y_true, y_probs, single_f1_scores, class_names, save_dir=PLOT_SAVE_DIR):
-    """一键生成毕设所需的 4 张核心图表"""
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-        
-    # 设置风格 (支持中文显示，如果环境不支持 SimHei 可改为 sans-serif)
-    sns.set_style("whitegrid")
-    plt.rcParams['axes.unicode_minus'] = False
-    try:
-        plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans'] 
-    except:
-        pass
-    
-    n_classes = len(class_names)
-    
-    # --- 图 1: 多类别 ROC 曲线 ---
-    try:
-        y_true_bin = label_binarize(y_true, classes=range(n_classes))
-        plt.figure(figsize=(10, 8))
-        colors = cycle(['blue', 'red', 'green', 'orange', 'purple', 'cyan', 'magenta'])
-        
-        for i, color in zip(range(n_classes), colors):
-            fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_probs[:, i])
-            roc_auc = auc(fpr, tpr)
-            plt.plot(fpr, tpr, color=color, lw=2, label=f'{class_names[i]} (AUC = {roc_auc:.3f})')
-        
-        plt.plot([0, 1], [0, 1], 'k--', lw=2)
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title('Multi-class ROC Curve')
-        plt.legend(loc="lower right")
-        plt.savefig(os.path.join(save_dir, '1_ROC_Curve.png'), dpi=300)
-        plt.close()
-    except Exception as e:
-        print(f"⚠️ ROC 绘图失败: {e}")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="评估单个 ResNet 架构的三折集成模型。")
+    parser.add_argument("--architecture", choices=ARCHITECTURES, default="resnet50")
+    parser.add_argument("--run-dir", type=Path, default=None, help="包含 fold*_best_model.pth 的目录。")
+    parser.add_argument("--data-dir", type=Path, default=PROJECT_ROOT / "data" / "test")
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "outputs" / "evaluate")
+    parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
 
-    # --- 图 2: Mel 阈值敏感度分析 ---
-    if 'mel' in class_names:
-        mel_idx = class_names.index('mel')
-        thresholds = np.arange(0, 1.01, 0.01)
-        recalls, precisions, f1_scores = [], [], []
-        
-        y_true_mel = (np.array(y_true) == mel_idx).astype(int)
-        mel_probs = y_probs[:, mel_idx]
-        
-        for t in thresholds:
-            y_pred_t = (mel_probs > t).astype(int)
-            tp = np.sum((y_pred_t == 1) & (y_true_mel == 1))
-            fp = np.sum((y_pred_t == 1) & (y_true_mel == 0))
-            fn = np.sum((y_pred_t == 0) & (y_true_mel == 1))
-            
-            r = tp / (tp + fn + 1e-7)
-            p = tp / (tp + fp + 1e-7)
-            f1 = 2 * p * r / (p + r + 1e-7)
-            recalls.append(r); precisions.append(p); f1_scores.append(f1)
-            
-        plt.figure(figsize=(10, 6))
-        plt.plot(thresholds, recalls, 'r-', label='Recall', lw=2)
-        plt.plot(thresholds, precisions, 'b--', label='Precision', lw=2)
-        plt.plot(thresholds, f1_scores, 'g-.', label='F1-Score', lw=2)
-        plt.axvline(x=0.25, color='k', linestyle=':', label='Selected Threshold (0.25)')
-        plt.xlabel('Threshold')
-        plt.title('Melanoma Threshold Sensitivity Analysis')
-        plt.legend()
-        plt.savefig(os.path.join(save_dir, '2_Threshold_Analysis.png'), dpi=300)
-        plt.close()
 
-    # --- 图 3: 归一化混淆矩阵 ---
-    y_pred_argmax = np.argmax(y_probs, axis=1) 
-    cm = confusion_matrix(y_true, y_pred_argmax)
-    cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-7)
-    
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='Blues',
-                xticklabels=class_names, yticklabels=class_names)
-    plt.title('Normalized Confusion Matrix')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.savefig(os.path.join(save_dir, '3_Confusion_Matrix.png'), dpi=300)
+def configure_chinese_style() -> None:
+    plt.rcParams["axes.unicode_minus"] = False
+    plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Noto Sans CJK SC", "DejaVu Sans"]
+
+
+def class_label(name: str) -> str:
+    return CLASS_NAME_ZH.get(name, name)
+
+
+def translate_value(value):
+    if isinstance(value, str):
+        return ROW_NAME_ZH.get(value, CLASS_NAME_ZH.get(value, value))
+    return value
+
+
+def table_for_output(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy().rename(columns=COLUMN_NAME_ZH)
+    return out.apply(lambda column: column.map(translate_value))
+
+
+def format_cell(value) -> str:
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)
+
+
+def to_markdown_table(df: pd.DataFrame) -> str:
+    headers = [str(col) for col in df.columns]
+    rows = [[format_cell(value) for value in row] for row in df.to_numpy()]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    return "\n".join(lines) + "\n"
+
+
+def save_table(df: pd.DataFrame, path_base: Path) -> None:
+    path_base.with_suffix(".md").write_text(to_markdown_table(table_for_output(df)), encoding="utf-8")
+
+
+def find_latest_complete_run(architecture: str) -> Path:
+    root = PROJECT_ROOT / "model_save" / architecture
+    candidates = sorted([p for p in root.glob("*") if p.is_dir()], reverse=True)
+    for candidate in candidates:
+        if all((candidate / f"fold{i}_best_model.pth").exists() for i in range(1, 4)):
+            return candidate
+    raise FileNotFoundError(f"在 {root} 下没有找到完整的三折模型目录。")
+
+
+def load_fold_paths(run_dir: Path) -> list[Path]:
+    paths = [run_dir / f"fold{i}_best_model.pth" for i in range(1, 4)]
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError("缺少模型文件: " + ", ".join(missing))
+    return paths
+
+
+def checkpoint_score(path: Path) -> float:
+    match = re.search(r"_f1_([0-9.]+)_", path.name)
+    return float(match.group(1)) if match else float("nan")
+
+
+def predict_ensemble(
+    architecture: str,
+    fold_paths: list[Path],
+    loader: DataLoader,
+    class_count: int,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    y_true_batches = []
+    ensemble_batches = []
+    fold_prob_batches = [[] for _ in fold_paths]
+
+    models = [
+        load_resnet_checkpoint(path, architecture=architecture, num_classes=class_count, device=device)
+        for path in fold_paths
+    ]
+
+    with torch.no_grad():
+        for inputs, labels in loader:
+            inputs = inputs.to(device)
+            probs = [F.softmax(model(inputs), dim=1).cpu().numpy() for model in models]
+            for idx, fold_probs in enumerate(probs):
+                fold_prob_batches[idx].append(fold_probs)
+            ensemble_batches.append(np.stack(probs, axis=0).mean(axis=0))
+            y_true_batches.append(labels.numpy())
+
+    y_true = np.concatenate(y_true_batches)
+    y_prob = np.concatenate(ensemble_batches)
+    fold_probs = [np.concatenate(items) for items in fold_prob_batches]
+
+    fold_rows = []
+    for idx, (path, prob) in enumerate(zip(fold_paths, fold_probs), start=1):
+        pred = np.argmax(prob, axis=1)
+        fold_rows.append(
+            {
+                "fold": idx,
+                "checkpoint": str(path.relative_to(PROJECT_ROOT)),
+                "checkpoint_val_f1": checkpoint_score(path),
+                "accuracy": accuracy_score(y_true, pred),
+                "macro_precision": precision_score(y_true, pred, average="macro", zero_division=0),
+                "macro_recall": recall_score(y_true, pred, average="macro", zero_division=0),
+                "macro_f1": f1_score(y_true, pred, average="macro", zero_division=0),
+                "weighted_f1": f1_score(y_true, pred, average="weighted", zero_division=0),
+            }
+        )
+    return y_true, y_prob, fold_rows
+
+
+def apply_priority_thresholds(y_prob: np.ndarray, class_names: list[str]) -> np.ndarray:
+    preds = np.argmax(y_prob, axis=1)
+    nv_idx = class_names.index("nv") if "nv" in class_names else None
+    for class_name, threshold in reversed(DEFAULT_PRIORITY_THRESHOLDS):
+        if class_name not in class_names:
+            continue
+        class_idx = class_names.index(class_name)
+        mask = y_prob[:, class_idx] > threshold
+        if class_name == "mel" and nv_idx is not None:
+            mask = mask & (y_prob[:, nv_idx] < DEFAULT_NV_SUPPRESSION_THRESHOLD)
+        preds[mask] = class_idx
+    return preds
+
+
+def metric_row(name: str, y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) -> dict:
+    return {
+        "strategy": name,
+        "accuracy": accuracy_score(y_true, y_pred),
+        "macro_precision": precision_score(y_true, y_pred, average="macro", zero_division=0),
+        "macro_recall": recall_score(y_true, y_pred, average="macro", zero_division=0),
+        "macro_f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
+        "weighted_f1": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+        "macro_ovr_auc": roc_auc_score(y_true, y_prob, multi_class="ovr", average="macro"),
+        "weighted_ovr_auc": roc_auc_score(y_true, y_prob, multi_class="ovr", average="weighted"),
+    }
+
+
+def save_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, class_names: list[str], out_dir: Path) -> None:
+    cm = confusion_matrix(y_true, y_pred, labels=range(len(class_names)))
+    cm_norm = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1)
+    labels = [class_label(name) for name in class_names]
+
+    plt.figure(figsize=(8.5, 7.2))
+    sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues", xticklabels=labels, yticklabels=labels)
+    plt.xlabel("预测类别")
+    plt.ylabel("真实类别")
+    plt.title("归一化混淆矩阵")
+    plt.tight_layout()
+    plt.savefig(out_dir / "归一化混淆矩阵.png", dpi=300)
     plt.close()
 
-    # --- 图 4: K-Fold 稳定性箱线图 ---
-    if single_f1_scores:
-        plt.figure(figsize=(6, 6))
-        sns.boxplot(y=single_f1_scores, color='skyblue', width=0.4)
-        sns.stripplot(y=single_f1_scores, color='red', size=8, jitter=True, label='Single Model')
-        plt.ylabel('Macro F1 Score')
-        plt.title(f'Model Stability (Mean F1={np.mean(single_f1_scores):.3f})')
-        plt.savefig(os.path.join(save_dir, '4_Stability_Boxplot.png'), dpi=300)
-        plt.close()
-    
-    print(f"\n📊 [图表生成完毕] 所有图片已保存至: {save_dir}")
 
-# ==========================================
-# 核心加载函数
-# ==========================================
-def load_models_auto():
-    search_path = os.path.join(MODEL_DIR, "*.pth")
-    model_paths = glob.glob(search_path)
-    model_paths.sort()
-    
-    if len(model_paths) == 0:
-        # 尝试查找子文件夹
-        subdirs = [d for d in glob.glob(os.path.join(MODEL_DIR, '*')) if os.path.isdir(d)]
-        if subdirs:
-            latest = max(subdirs, key=os.path.getctime)
-            search_path = os.path.join(latest, "*.pth")
-            model_paths = glob.glob(search_path)
-            model_paths.sort()
-    
-    if len(model_paths) == 0:
-        raise FileNotFoundError(f"在 {MODEL_DIR} 下没找到任何 .pth 模型文件！")
-    
-    models_list = []
-    print(f"🚀 正在加载 {len(model_paths)} 个模型 (Top-K Ensemble)...")
-    
-    for path in model_paths:
-        model = models.resnet50(pretrained=False)
-        model.fc = nn.Linear(model.fc.in_features, NUM_CLASSES)
-        model.load_state_dict(torch.load(path, map_location=DEVICE))
-        model = model.to(DEVICE)
-        model.eval()
-        models_list.append(model)
-        
-    return models_list, model_paths
+def save_roc_figure(y_true: np.ndarray, y_prob: np.ndarray, class_names: list[str], out_dir: Path) -> None:
+    y_bin = label_binarize(y_true, classes=range(len(class_names)))
+    plt.figure(figsize=(8.5, 7.0))
+    for idx, class_name in enumerate(class_names):
+        fpr, tpr, _ = roc_curve(y_bin[:, idx], y_prob[:, idx])
+        auc_value = roc_auc_score(y_bin[:, idx], y_prob[:, idx])
+        plt.plot(fpr, tpr, linewidth=1.8, label=f"{class_label(class_name)} AUC={auc_value:.3f}")
+    plt.plot([0, 1], [0, 1], color="gray", linestyle="--", linewidth=1)
+    plt.xlabel("假阳性率")
+    plt.ylabel("真阳性率")
+    plt.title("一对其余 ROC 曲线")
+    plt.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(out_dir / "ROC曲线.png", dpi=300)
+    plt.close()
 
-# ==========================================
-# 主推理函数
-# ==========================================
-def ensemble_inference():
-    # 1. 准备数据
-    test_transforms = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-    
-    real_test_dir = TEST_DIR
-    if not os.path.exists(TEST_DIR):
-        print(f"⚠️ 没找到 {TEST_DIR}，临时使用 ./data/val 演示")
-        real_test_dir = './data/val'
-        
-    try:
-        dataset = datasets.ImageFolder(real_test_dir, transform=test_transforms)
-    except FileNotFoundError:
-        print(f"❌ 错误：找不到数据目录 {real_test_dir}")
+
+def save_melanoma_threshold_figure(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    class_names: list[str],
+    out_dir: Path,
+) -> None:
+    if "mel" not in class_names:
         return
 
-    loader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=4)
-    class_names = dataset.classes
+    mel_idx = class_names.index("mel")
+    y_mel = (y_true == mel_idx).astype(int)
+    thresholds = np.linspace(0, 1, 101)
+    rows = []
+    for threshold in thresholds:
+        pred = (y_prob[:, mel_idx] >= threshold).astype(int)
+        rows.append(
+            {
+                "threshold": threshold,
+                "precision": precision_score(y_mel, pred, zero_division=0),
+                "recall": recall_score(y_mel, pred, zero_division=0),
+                "f1": f1_score(y_mel, pred, zero_division=0),
+            }
+        )
+    df = pd.DataFrame(rows)
 
-    # 解析阈值配置
-    threshold_configs = []
-    print("\n⚖️  初始化风险阈值策略：")
-    for cls_name, threshold in PRIORITY_THRESHOLDS:
-        try:
-            idx = class_names.index(cls_name)
-            threshold_configs.append({'idx': idx, 'name': cls_name, 'thresh': threshold})
-            print(f"   👉 优先级锁定: {cls_name:<6} (ID: {idx}) | 触发阈值 > {threshold}")
-        except ValueError:
-            pass
-            
-    # 查找 nv (黑色素痣) 的索引
-    try:
-        nv_idx = class_names.index('nv')
-        print(f"   🛡️ 误报抑制开启: 当 nv > {NV_SUPPRESSION_THRESHOLD} 时，忽略 Mel 警报")
-    except ValueError:
-        nv_idx = -1
-        print("   ⚠️ 警告: 未找到 'nv' 类别，误报抑制失效")
+    plt.figure(figsize=(8.2, 5.2))
+    plt.plot(df["threshold"], df["precision"], label="精确率", linewidth=2)
+    plt.plot(df["threshold"], df["recall"], label="召回率", linewidth=2)
+    plt.plot(df["threshold"], df["f1"], label="F1分数", linewidth=2)
+    plt.axvline(0.25, color="black", linestyle="--", linewidth=1.2, label="选定阈值=0.25")
+    plt.xlabel("黑色素瘤预测概率阈值")
+    plt.ylabel("指标值")
+    plt.title("黑色素瘤阈值敏感性分析")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / "黑色素瘤阈值敏感性.png", dpi=300)
+    plt.close()
 
-    # 2. 自动加载模型群
-    models_list, model_paths = load_models_auto()
-    
-    y_true = []
-    y_pred_ensemble = []   # 标准策略
-    y_pred_thresh = []     # 阈值策略
-    all_ensemble_probs = [] # 【新增】用于画 ROC 曲线
-    
-    single_model_preds = [[] for _ in range(len(models_list))]
-    
-    print("\n🚀 开始集成推理 (双策略并行计算)...")
-    
-    # 3. 推理循环
-    with torch.no_grad():
-        for inputs, labels in tqdm(loader):
-            inputs = inputs.to(DEVICE)
-            
-            # 多模型预测累加
-            batch_probs_sum = torch.zeros(inputs.size(0), NUM_CLASSES).to(DEVICE)
-            for i, model in enumerate(models_list):
-                outputs = model(inputs)
-                probs = F.softmax(outputs, dim=1)
-                batch_probs_sum += probs
-                
-                # 记录单模型预测
-                _, single_preds = torch.max(probs, 1)
-                single_model_preds[i].extend(single_preds.cpu().numpy())
-            
-            # 取平均
-            avg_probs = batch_probs_sum / len(models_list)
-            
-            # 【关键】收集概率用于绘图
-            all_ensemble_probs.append(avg_probs.cpu().numpy())
-            
-            # --- 策略 A: 标准集成 (Argmax) ---
-            _, final_preds = torch.max(avg_probs, 1)
-            
-            # --- 策略 B: 阈值修正 (Threshold) + 双重确认 ---
-            preds_thresh_batch = final_preds.clone()
-            
-            # 倒序应用阈值
-            for config in reversed(threshold_configs):
-                target_idx = config['idx']
-                thresh_val = config['thresh']
-                target_name = config['name']
-                
-                target_probs = avg_probs[:, target_idx]
-                
-                # 【修改点】应用 NV < 0.8 的抑制逻辑
-                if target_name == 'mel' and nv_idx != -1:
-                    nv_probs = avg_probs[:, nv_idx]
-                    # 只有当 (Mel > 0.25) 且 (NV < 0.8) 时，才认为是 Mel
-                    mask = (target_probs > thresh_val) & (nv_probs < NV_SUPPRESSION_THRESHOLD)
-                else:
-                    # 其他类别 (bcc, akiec) 保持原样
-                    mask = target_probs > thresh_val
-                
-                preds_thresh_batch[mask] = target_idx
-            
-            y_true.extend(labels.cpu().numpy())
-            y_pred_ensemble.extend(final_preds.cpu().numpy())
-            y_pred_thresh.extend(preds_thresh_batch.cpu().numpy())
 
-    # =======================================================
-    # 报告生成部分
-    # =======================================================
-    print("\n" + "="*60)
-    print("[报告1] 架构性能对比 (单模型 vs 集成模型)")
-    print("="*60)
-    
-    single_f1_scores = []
-    for i, preds in enumerate(single_model_preds):
-        f1 = f1_score(y_true, preds, average='macro')
-        single_f1_scores.append(f1)
-        
-    ensemble_f1 = f1_score(y_true, y_pred_ensemble, average='macro')
-    ensemble_acc = accuracy_score(y_true, y_pred_ensemble)
-    best_single_f1 = max(single_f1_scores)
-    
-    print(f"单模型最优F1:   {best_single_f1:.4f}")
-    print(f"多模型集成F1:      {ensemble_f1:.4f}")
-    print(f"性能提升:        {ensemble_f1 - best_single_f1:+.4f}")
-    #print(f"Ensemble Accuracy:      {ensemble_acc:.4f}")
+def main() -> None:
+    args = parse_args()
+    set_seed(args.seed)
+    sns.set_theme(style="whitegrid", context="paper")
+    configure_chinese_style()
 
-    # --- 策略对比 ---
-    print("\n" + "="*60)
-    print("[报告2] 临床策略对比 (默认策略 vs 风险阈值)")
-    print("="*60)
-    
-    acc_thresh = accuracy_score(y_true, y_pred_thresh)
-    f1_thresh = f1_score(y_true, y_pred_thresh, average='macro')
-    
-    print(f"{'性能指标':<16} | {'默认':<10} | {'阈值':<10} | {'变换'}")
-    print("-" * 60)
-    print(f"{'Accuracy':<20} | {ensemble_acc:.4f}{' '*4} | {acc_thresh:.4f}{' '*5} | {acc_thresh - ensemble_acc:+.4f}")
-    print(f"{'Macro F1':<20} | {ensemble_f1:.4f}{' '*4} | {f1_thresh:.4f}{' '*5} | {f1_thresh - ensemble_f1:+.4f}")
-    
-    print("-" * 60)
-    print("高危类别召回率变化：")
-    print(f"{'类别':<8} | {'默认':<8} | {'阈值':<8} | {'变化'}")
-    
-    metrics_std = classification_report(y_true, y_pred_ensemble, target_names=class_names, output_dict=True)
-    metrics_thr = classification_report(y_true, y_pred_thresh, target_names=class_names, output_dict=True)
-    
-    focus_classes = [c[0] for c in PRIORITY_THRESHOLDS]
-    for cls in focus_classes:
-        if cls in class_names:
-            r_std = metrics_std[cls]['recall']
-            r_thr = metrics_thr[cls]['recall']
-            print(f"{cls:<10} | {r_std:.4f}{' '*4} | {r_thr:.4f}{' '*5} | {r_thr - r_std:+.4f}")
+    run_dir = args.run_dir or find_latest_complete_run(args.architecture)
+    out_dir = ensure_dir(args.output_dir)
+    print(f"正在评估 {args.architecture}，结果将保存到 {out_dir}")
 
-    print("\n" + "="*60)
-    print("[报告3] 详细分类报告对比")
-    print("="*60)
-    print("\n[A] 标准集成策略")
-    print(classification_report(y_true, y_pred_ensemble, target_names=class_names, digits=4))
-    print("\n[B] 优先级阈值策略")
-    print(classification_report(y_true, y_pred_thresh, target_names=class_names, digits=4))
-    print("="*60)
+    dataset = datasets.ImageFolder(args.data_dir, transform=build_eval_transform(args.image_size))
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    class_names = dataset.classes or CLASS_NAMES
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    fold_paths = load_fold_paths(run_dir)
 
-    # --- 自动绘图 ---
-    print("\n🎨 正在绘制毕设插图 (ROC/混淆矩阵/阈值分析)...")
-    try:
-        all_ensemble_probs = np.concatenate(all_ensemble_probs, axis=0)
-        plot_thesis_figures(y_true, all_ensemble_probs, single_f1_scores, class_names)
-    except Exception as e:
-        print(f"❌ 绘图出错: {e}")
+    y_true, y_prob, fold_rows = predict_ensemble(args.architecture, fold_paths, loader, len(class_names), device)
+    pred_argmax = np.argmax(y_prob, axis=1)
+    pred_threshold = apply_priority_thresholds(y_prob, class_names)
 
-if __name__ == '__main__':
-    ensemble_inference()
+    metrics = pd.DataFrame(
+        [
+            metric_row("三折集成-最大概率策略", y_true, pred_argmax, y_prob),
+            metric_row("三折集成-临床阈值策略", y_true, pred_threshold, y_prob),
+        ]
+    )
+    report = pd.DataFrame(classification_report(y_true, pred_argmax, target_names=class_names, output_dict=True)).T
+
+    save_table(metrics, out_dir / "总体指标")
+    save_table(report.reset_index(names="class"), out_dir / "分类报告")
+    save_table(pd.DataFrame(fold_rows), out_dir / "各折指标")
+    save_confusion_matrix(y_true, pred_argmax, class_names, out_dir)
+    save_roc_figure(y_true, y_prob, class_names, out_dir)
+    save_melanoma_threshold_figure(y_true, y_prob, class_names, out_dir)
+
+    print("评估图表已保存。")
+
+
+if __name__ == "__main__":
+    main()
